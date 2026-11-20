@@ -1,0 +1,116 @@
+@inject HttpClient Http
+@inject IConfiguration Config
+
+<h1>Operation Padma</h1>
+<p class="sub">Turn-based tactical war game. Blue vs Red. Sob enemy unit dhongsho koro.</p>
+<div class="bar">
+    <span>Round @E.Round | @(E.Turn == Team.Blue ? "Your turn" : "Enemy turn")</span>
+    <input @bind="player" maxlength="20" placeholder="Your name" />
+    <button @onclick="EndTurn" disabled="@(E.Turn != Team.Blue || E.Winner != null || busy)">End turn</button>
+    <button @onclick="Restart">Restart</button>
+</div>
+<div class="msg">@msg</div>
+
+<div class="board">
+@for (int y = 0; y < GameEngine.H; y++)
+{
+    for (int x = 0; x < GameEngine.W; x++)
+    {
+        var cx = x; var cy = y;
+        var u = E.UnitAt(cx, cy);
+        <div class="t @E.Map[cy, cx].ToString().ToLower() @(IsMove(cx, cy) ? "mv" : "") @(u != null && targets.Contains(u) ? "tg" : "") @(u != null && u == sel ? "sel" : "")"
+             @onclick="() => Click(cx, cy)">
+            @if (u != null)
+            {
+                <div class="u @u.Team.ToString().ToLower() @(u.Team == Team.Blue && u.Acted ? "done" : "")">@u.Tag<small>@u.Hp</small></div>
+            }
+        </div>
+    }
+}
+</div>
+
+<div class="log">@foreach (var l in E.Log.TakeLast(12)) { <div>@l</div> }</div>
+
+@if (board.Count > 0)
+{
+    <h3>Leaderboard (fewest rounds)</h3>
+    <ol>
+    @foreach (var r in board) { <li>@r.Player: @r.Rounds rounds, @r.BlueLeft units left</li> }
+    </ol>
+}
+
+<p class="legend">Unit select koro, hoilud tile-e move koro, lal tile-e enemy attack koro. Forest-e move cost 2 ar defense +2. Nodi par hoite majher bridge tile use koro. TNK infantry er opor +2 damage. ART range 2-3, forest defense ignore kore.</p>
+
+@code {
+    GameEngine E = new();
+    Unit? sel;
+    List<(int X, int Y)> moves = new();
+    List<Unit> targets = new();
+    List<MatchResult> board = new();
+    string msg = "Tomar turn. Ekta blue unit select koro.";
+    string player = "Player";
+    bool busy, saved;
+
+    string? Api => Config["ApiUrl"];
+
+    protected override async Task OnInitializedAsync() => await LoadBoard();
+
+    bool IsMove(int x, int y) => moves.Contains((x, y));
+    void Clear() { sel = null; moves = new(); targets = new(); }
+
+    void Restart() { E.Reset(); Clear(); saved = false; msg = "Tomar turn. Ekta blue unit select koro."; }
+
+    void Select(Unit u)
+    {
+        sel = u;
+        moves = u.Moved ? new() : E.Reach(u);
+        targets = E.Targets(u);
+        msg = $"{u.Tag} selected. HP {u.Hp}/{u.MaxHp}";
+    }
+
+    async Task Click(int x, int y)
+    {
+        if (E.Winner != null || busy || E.Turn != Team.Blue) return;
+        var u = E.UnitAt(x, y);
+        if (sel != null)
+        {
+            if (IsMove(x, y)) { E.Move(sel, x, y); Select(sel); return; }
+            if (u != null && targets.Contains(u)) { E.Attack(sel, u); Clear(); await CheckEnd(); return; }
+        }
+        if (u?.Team == Team.Blue) Select(u); else Clear();
+    }
+
+    async Task EndTurn()
+    {
+        Clear(); busy = true; E.BeginEnemyTurn(); msg = "Enemy turn...";
+        foreach (var u in E.Units.Where(x => x.Team == Team.Red).ToList())
+        {
+            await Task.Delay(450);
+            if (E.Winner != null) break;
+            if (E.Units.Contains(u)) EnemyAI.Act(E, u);
+            StateHasChanged();
+        }
+        E.EndEnemyTurn(); busy = false;
+        if (E.Winner == null) msg = "Tomar turn.";
+        await CheckEnd();
+    }
+
+    async Task CheckEnd()
+    {
+        if (E.Winner == null) return;
+        msg = E.Winner == Team.Blue ? "Victory! Red force dhongsho hoyeche." : "Defeat. Blue force shesh.";
+        if (!saved) { saved = true; await Save(); }
+    }
+
+    async Task Save()
+    {
+        if (string.IsNullOrEmpty(Api)) return;
+        try { await Http.PostAsJsonAsync($"{Api}/matches", E.Result(player)); await LoadBoard(); } catch { }
+    }
+
+    async Task LoadBoard()
+    {
+        if (string.IsNullOrEmpty(Api)) return;
+        try { board = await Http.GetFromJsonAsync<List<MatchResult>>($"{Api}/leaderboard") ?? new(); } catch { }
+    }
+}
